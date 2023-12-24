@@ -18,6 +18,7 @@ func AuthRequired() gin.HandlerFunc {
 
 			// Validate token
 			if validateToken(token) {
+				c.Set("token", token)
 				c.Next()
 				return
 			}

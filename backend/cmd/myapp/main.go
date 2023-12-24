@@ -22,5 +22,5 @@ func main() {
 	private.Use(middleware.AuthRequired())
 	routes.ImageRoutes(private)
 
-	r.Run()
+	r.Run(":8082")
 }

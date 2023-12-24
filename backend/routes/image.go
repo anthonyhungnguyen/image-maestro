@@ -2,8 +2,12 @@ package routes
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"image"
 	_ "image/jpeg" // register jpeg
 	"io"
@@ -11,6 +15,9 @@ import (
 	"net/http"
 
 	"github.com/anthonyhungnguyen/image-maestro/model"
+	"github.com/anthonyhungnguyen/image-maestro/pkg/firebase"
+	"github.com/anthonyhungnguyen/image-maestro/pkg/postgres"
+	"github.com/davidbyttow/govips/v2/vips"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
 	"github.com/rwcarlsen/goexif/exif"
@@ -19,6 +26,8 @@ import (
 
 func ImageRoutes(r *gin.RouterGroup) {
 	r.POST("/image", getImage)
+	r.POST("/image/:image_id/annotate", annotateImage)
+	r.GET("/image/thumbnail", extractThumbnail)
 }
 
 func getImage(c *gin.Context) {
@@ -87,18 +96,31 @@ func getImage(c *gin.Context) {
 		})
 	}
 
+	imageResponse := model.ImageResponse{
+		Id:          ksuid.New().String(),
+		Url:         requestBody.Url,
+		ContentType: extension,
+		Exif:        exif,
+		Status:      "success",
+		Checksum:    generateChecksum(body),
+		Width:       img.Bounds().Dx(),
+		Height:      img.Bounds().Dy(),
+		ByteSize:    int64(len(body)),
+	}
+	// Upload image to firebase
+	if err := firebase.UploadImage(body, imageResponse); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"message": "cannot upload image, exception: " + err.Error(),
+		})
+		c.Abort()
+		return
+	}
+
+	// Save to database
+	postgres.SaveImage(imageResponse)
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": model.ImageResponse{
-			Id:          ksuid.New().String(),
-			Url:         requestBody.Url,
-			ContentType: extension,
-			Exif:        exif,
-			Status:      "success",
-			Checksum:    generateChecksum(body),
-			Width:       img.Bounds().Dx(),
-			Height:      img.Bounds().Dy(),
-			ByteSize:    int64(len(body)),
-		},
+		"message": imageResponse,
 	})
 }
 
@@ -123,4 +145,69 @@ func detectMIMEType(content []byte) string {
 func generateChecksum(content []byte) string {
 	hash := sha256.Sum256(content)
 	return hex.EncodeToString(hash[:])
+}
+
+func getToken(c *gin.Context) (string, error) {
+	token, exists := c.Get("token")
+	if exists {
+		return token.(string), nil
+	} else {
+		log.Fatal().Msg("token not found")
+		return "", errors.New("token not found")
+	}
+}
+
+// TODO: implement this
+func annotateImage(c *gin.Context) {
+	imageId := c.Param("image_id")
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("annotated image %s", imageId),
+	})
+}
+
+func validateSig(c *gin.Context, imageId string, sig string) bool {
+	token, exists := getToken(c)
+	if exists != nil {
+		return false
+	}
+
+	secret := []byte(token)
+	message := []byte(imageId)
+
+	// // Create a new HMAC by defining the hash type and the key (as byte array)
+	h := hmac.New(crypto.SHA256.New, secret)
+
+	// Write Data to it
+	h.Write(message)
+
+	// Get result and encode as hexadecimal string
+	signature := h.Sum(nil)
+	hexSignature := hex.EncodeToString(signature)
+
+	return hexSignature == sig
+}
+
+// Thumbnail
+func extractThumbnail(c *gin.Context) {
+	imageId := c.Query("image_id")
+	// height := c.Query("height")
+	// width := c.Query("width")
+	sig := c.Query("sig")
+
+	// Validate sig
+	if !validateSig(c, imageId, sig) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"message": "unauthorized",
+		})
+	}
+	vips.Startup(nil)
+	defer vips.Shutdown()
+
+	// Generate thumbnail
+
+	// imageId := c.Param("image_id")
+	// log.Print(imageId)
+	// c.JSON(http.StatusOK, gin.H{
+	// 	"message": fmt.Sprintf("extracted thumbnail for image %s", imageId),
+	// })
 }
